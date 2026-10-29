@@ -35,12 +35,65 @@ type MockOptions = {
   empty?: 'services' | 'professionals' | 'slots'
   post?: (route: Route, count: number) => Promise<void>
   serviceError?: boolean
+  turnstile?: 'auto' | 'error' | 'script-blocked'
 }
 
 async function mockApi(page: Page, options: MockOptions = {}) {
-  const requests: { path: string; authorization: string | undefined; body: string | null }[] = []
+  const requests: {
+    path: string
+    authorization: string | undefined
+    turnstileToken: string | undefined
+    body: string | null
+  }[] = []
   let posts = 0
   await page.clock.install({ time: new Date('2026-11-01T02:00:00Z') })
+  if (options.turnstile === 'script-blocked') {
+    await page.route(
+      'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit',
+      (route) => route.abort('blockedbyclient'),
+    )
+  } else {
+    await page.addInitScript(
+      ({ mode }) => {
+        type WidgetOptions = {
+          action: string
+          language: string
+          callback: (token: string) => void
+          'expired-callback': () => void
+          'error-callback': () => void
+        }
+        let widgetOptions: WidgetOptions | undefined
+        let tokenNumber = 0
+        const solve = () => {
+          tokenNumber++
+          widgetOptions?.callback(`simulated-turnstile-token-${tokenNumber}`)
+        }
+        window.turnstile = {
+          render: (container, receivedOptions) => {
+            widgetOptions = receivedOptions
+            Object.assign(window, {
+              __turnstileConfiguration: {
+                action: receivedOptions.action,
+                language: receivedOptions.language,
+              },
+            })
+            container.textContent = 'Widget Turnstile simulado'
+            queueMicrotask(() => {
+              if (mode === 'error') widgetOptions?.['error-callback']()
+              else solve()
+            })
+            return 'simulated-widget'
+          },
+          reset: () => queueMicrotask(solve),
+          remove: () => undefined,
+        }
+        Object.assign(window, {
+          __turnstileExpire: () => widgetOptions?.['expired-callback'](),
+        })
+      },
+      { mode: options.turnstile ?? 'auto' },
+    )
+  }
   await page.route('**/api/public/businesses/**', async (route) => {
     const request = route.request()
     const url = new URL(request.url())
@@ -48,6 +101,7 @@ async function mockApi(page: Page, options: MockOptions = {}) {
     requests.push({
       path: `${path}${url.search}`,
       authorization: request.headers().authorization,
+      turnstileToken: request.headers()['x-turnstile-token'],
       body: request.postData(),
     })
     const json = (body: unknown, status = 200) => route.fulfill({ status, json: body })
@@ -123,6 +177,19 @@ test('recorrido completo, comprobante del backend y ningún Authorization', asyn
     customerPhone: null,
     notes: null,
   })
+  expect(requests.find((request) => request.body)?.turnstileToken).toMatch(
+    /^simulated-turnstile-token-/,
+  )
+  await expect
+    .poll(() =>
+      page.evaluate(() => {
+        const configuredWindow = window as typeof window & {
+          __turnstileConfiguration: { action: string; language: string }
+        }
+        return configuredWindow.__turnstileConfiguration
+      }),
+    )
+    .toEqual({ action: 'create_booking', language: 'es' })
   expect(requests.every((r) => r.authorization === undefined)).toBe(true)
   await expect
     .poll(() => requests.filter((r) => r.path.includes('/availability')).length)
@@ -188,13 +255,13 @@ test('409 informa conflicto, limpia turno y reconsulta disponibilidad', async ({
   await expect(page.getByRole('button', { name: 'Confirmar reserva', exact: true })).toHaveCount(0)
 })
 
-for (const failure of ['network', '500', 'invalid'] as const) {
+for (const failure of ['network', '503', 'invalid'] as const) {
   test(`resultado incierto ${failure}: reintento idéntico y bloqueo`, async ({ page }) => {
     const requests = await mockApi(page, {
       post: async (route, count) => {
         if (count > 1) return route.fulfill({ status: 201, json: receipt })
         if (failure === 'network') return route.abort('failed')
-        return route.fulfill({ status: failure === '500' ? 500 : 201, json: {} })
+        return route.fulfill({ status: failure === '503' ? 503 : 201, json: {} })
       },
     })
     await review(page)
@@ -212,8 +279,86 @@ for (const failure of ['network', '500', 'invalid'] as const) {
     const posts = requests.filter((r) => r.body)
     expect(posts).toHaveLength(2)
     expect(posts[0].body).toBe(posts[1].body)
+    expect(posts[0].turnstileToken).not.toBe(posts[1].turnstileToken)
   })
 }
+
+test('Turnstile bloquea confirmación al expirar y permite completar uno nuevo', async ({
+  page,
+}) => {
+  const requests = await mockApi(page)
+  await review(page)
+  await expect(page.getByRole('button', { name: 'Confirmar reserva', exact: true })).toBeEnabled()
+  await page.evaluate(() => {
+    const controls = window as typeof window & { __turnstileExpire: () => void }
+    controls.__turnstileExpire()
+  })
+  await expect(page.getByText('La verificación ha caducado. Complétala nuevamente.')).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Completa la verificación' })).toBeDisabled()
+  expect(requests.filter((request) => request.body)).toHaveLength(0)
+  await page.getByRole('button', { name: 'Reiniciar verificación' }).click()
+  await expect(page.getByRole('button', { name: 'Confirmar reserva', exact: true })).toBeEnabled()
+})
+
+test('error del widget mantiene bloqueado el POST y permite reintentar su carga', async ({
+  page,
+}) => {
+  const requests = await mockApi(page, { turnstile: 'error' })
+  await review(page)
+  await expect(
+    page.getByText('No se pudo cargar o completar la verificación de seguridad.'),
+  ).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Completa la verificación' })).toBeDisabled()
+  await page.getByRole('button', { name: 'Reintentar verificación' }).click()
+  await expect(
+    page.getByText('No se pudo cargar o completar la verificación de seguridad.'),
+  ).toBeVisible()
+  expect(requests.filter((request) => request.body)).toHaveLength(0)
+})
+
+test('script de Turnstile bloqueado muestra error y nunca omite la verificación', async ({
+  page,
+}) => {
+  const requests = await mockApi(page, { turnstile: 'script-blocked' })
+  await review(page)
+  await expect(
+    page.getByText('No se pudo cargar o completar la verificación de seguridad.'),
+  ).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Completa la verificación' })).toBeDisabled()
+  await page.getByRole('button', { name: 'Reintentar verificación' }).click()
+  await expect(
+    page.getByText('No se pudo cargar o completar la verificación de seguridad.'),
+  ).toBeVisible()
+  expect(requests.filter((request) => request.body)).toHaveLength(0)
+})
+
+test('403 exige otro Turnstile sin perder incertidumbre, clave ni cuerpo', async ({ page }) => {
+  const requests = await mockApi(page, {
+    post: (route, count) => {
+      if (count === 1) return route.abort('failed')
+      if (count === 2) return route.fulfill({ status: 403, json: {} })
+      return route.fulfill({ status: 201, json: receipt })
+    },
+  })
+  await review(page)
+  await page.getByRole('button', { name: 'Confirmar reserva', exact: true }).click()
+  await expect(page.getByText('El resultado es incierto.', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Reintentar el mismo intento' }).click()
+  await expect(
+    page.getByText(
+      'La verificación de seguridad fue rechazada. Complétala nuevamente para reintentar.',
+    ),
+  ).toBeVisible()
+  await expect(page.getByText('El resultado es incierto.', { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Editar datos' })).toBeDisabled()
+  await expect(page.getByRole('button', { name: 'Reintentar el mismo intento' })).toBeEnabled()
+  await page.getByRole('button', { name: 'Reintentar el mismo intento' }).click()
+  await expect(page.getByRole('heading', { name: 'Tu reserva ha sido registrada' })).toBeVisible()
+  const posts = requests.filter((request) => request.body)
+  expect(posts).toHaveLength(3)
+  expect(new Set(posts.map((request) => request.body)).size).toBe(1)
+  expect(new Set(posts.map((request) => request.turnstileToken)).size).toBe(3)
+})
 
 test('429 espera, no reintenta automáticamente y conserva payload y clave', async ({ page }) => {
   const requests = await mockApi(page, {
@@ -258,6 +403,7 @@ test('429 espera, no reintenta automáticamente y conserva payload y clave', asy
   const posts = requests.filter((request) => request.body)
   expect(posts).toHaveLength(2)
   expect(posts[0].body).toBe(posts[1].body)
+  expect(posts[0].turnstileToken).not.toBe(posts[1].turnstileToken)
 })
 
 test('429 usa retryAfterSeconds cuando Retry-After es inválido', async ({ page }) => {

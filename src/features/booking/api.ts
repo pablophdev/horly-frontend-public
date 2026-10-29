@@ -87,9 +87,10 @@ export const bookingApi = {
       availabilitySchema,
       { signal },
     ),
-  book: (slug: string, payload: BookingPayload) =>
+  book: (slug: string, payload: BookingPayload, turnstileToken: string) =>
     request(`${base(slug)}/bookings`, receiptSchema, {
       method: 'POST',
+      headers: { 'X-Turnstile-Token': turnstileToken },
       body: JSON.stringify(payload),
     }),
 }

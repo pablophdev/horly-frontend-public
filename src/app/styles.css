@@ -442,6 +442,30 @@ textarea {
   background: #fff6e5;
   color: #795619;
 }
+.turnstile-panel {
+  margin: 18px 0;
+  padding: 18px;
+  overflow: hidden;
+  background: #fafaff;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.turnstile-panel > strong {
+  display: block;
+  font-size: 12px;
+}
+.turnstile-panel > p {
+  margin-top: 5px;
+  font-size: 11px;
+}
+.turnstile-widget {
+  min-height: 65px;
+  margin-top: 14px;
+}
+.turnstile-success {
+  color: #218161 !important;
+  font-weight: 600;
+}
 .actions {
   display: flex;
   flex-wrap: wrap;

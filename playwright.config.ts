@@ -13,5 +13,6 @@ export default defineConfig({
     command: 'npm run dev -- --port 5174',
     url: 'http://localhost:5174',
     reuseExistingServer: false,
+    env: { VITE_TURNSTILE_SITE_KEY: 'test-public-site-key' },
   },
 })

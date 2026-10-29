@@ -58,10 +58,12 @@ export async function request<T>(
   schema: z.ZodType<T>,
   options: RequestInit = {},
 ): Promise<T> {
+  const headers = new Headers(options.headers)
+  if (options.body) headers.set('Content-Type', 'application/json')
   const response = await fetch(`${origin}/api${path}`, {
     ...options,
     credentials: 'omit',
-    headers: options.body ? { 'Content-Type': 'application/json' } : undefined,
+    headers,
   })
   if (response.status === 429) throw await rateLimitError(response)
   if (!response.ok) throw new ApiError(response.status)
@@ -77,6 +79,8 @@ export function errorMessage(error: unknown): string {
   if (error instanceof ApiError) {
     if (error.status === 400) return 'Revisa los datos enviados e inténtalo de nuevo.'
     if (error.status === 404) return 'El recurso ya no está disponible.'
+    if (error.status === 403)
+      return 'La verificación de seguridad fue rechazada. Complétala nuevamente para reintentar.'
     if (error.status === 409)
       return 'Hay un conflicto con la reserva. Revisa la disponibilidad y selecciona un turno de nuevo.'
     return `El servidor devolvió un error (HTTP ${error.status}). Inténtalo de nuevo.`

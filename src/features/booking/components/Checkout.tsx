@@ -1,8 +1,10 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { useBlocker } from 'react-router-dom'
 import { ApiError, RateLimitError, errorMessage } from '../../../shared/api/http'
 import { LeaveAttemptDialog } from '../../../shared/ui/LeaveAttemptDialog'
+import { TurnstileWidget } from '../../../shared/turnstile/TurnstileWidget'
+import type { TurnstileWidgetHandle } from '../../../shared/turnstile/TurnstileWidget'
 import { bookingApi } from '../api'
 import type { BookingPayload, Business, Professional, Receipt, Service, Slot } from '../api'
 import { dateTime, price, time } from '../format'
@@ -15,7 +17,7 @@ type Customer = {
 }
 type Attempt = {
   payload: BookingPayload
-  status: 'sending' | 'uncertain' | 'rate-limited'
+  status: 'sending' | 'uncertain' | 'rate-limited' | 'verification-required'
   uncertain: boolean
   retryAt?: number
 }
@@ -52,9 +54,14 @@ export function Checkout({
   const [receipt, setReceipt] = useState<Receipt>()
   const [error, setError] = useState('')
   const [retryAfterSeconds, setRetryAfterSeconds] = useState(0)
+  const [turnstileToken, setTurnstileToken] = useState<string | null>(null)
   const busy = useRef(false)
   const mounted = useRef(true)
   const title = useRef<HTMLHeadingElement>(null)
+  const turnstile = useRef<TurnstileWidgetHandle>(null)
+  const handleTurnstileToken = useCallback((token: string | null) => {
+    setTurnstileToken(token)
+  }, [])
   const blocker = useBlocker(Boolean(attempt))
   useEffect(() => {
     mounted.current = true
@@ -101,8 +108,9 @@ export function Checkout({
   }
 
   async function send() {
-    if (busy.current || receipt || retryAfterSeconds > 0) return
+    if (busy.current || receipt || retryAfterSeconds > 0 || !turnstileToken) return
     busy.current = true
+    const tokenForRequest = turnstileToken
     const payload = attempt?.payload ?? {
       requestKey: crypto.randomUUID(),
       professionalId: professional.id,
@@ -119,7 +127,7 @@ export function Checkout({
     onLock(true)
     setError('')
     try {
-      const result = await bookingApi.book(slug, payload)
+      const result = await bookingApi.book(slug, payload, tokenForRequest)
       if (!mounted.current) return
       setReceipt(result)
       setAttempt(undefined)
@@ -138,6 +146,9 @@ export function Checkout({
       } else if (!(cause instanceof ApiError) || cause.status >= 500) {
         setAttempt({ payload, status: 'uncertain', uncertain: true })
         setError(errorMessage(cause))
+      } else if (cause.status === 403) {
+        setAttempt({ payload, status: 'verification-required', uncertain: wasUncertain })
+        setError(errorMessage(cause))
       } else {
         setAttempt(undefined)
         onLock(false)
@@ -148,6 +159,10 @@ export function Checkout({
       }
     } finally {
       busy.current = false
+      if (mounted.current) {
+        setTurnstileToken(null)
+        turnstile.current?.reset()
+      }
     }
   }
 
@@ -300,6 +315,7 @@ export function Checkout({
           <p className="notice">
             La confirmación no representa un pago. El turno se confirma al completar la reserva.
           </p>
+          <TurnstileWidget ref={turnstile} onTokenChange={handleTurnstileToken} />
           {error && (
             <p role="alert" className="notice error">
               {error}
@@ -329,7 +345,7 @@ export function Checkout({
           <div className="actions">
             <button
               className="primary"
-              disabled={attempt?.status === 'sending' || retryAfterSeconds > 0}
+              disabled={attempt?.status === 'sending' || retryAfterSeconds > 0 || !turnstileToken}
               aria-describedby={retryAfterSeconds > 0 ? 'rate-limit-countdown' : undefined}
               onClick={send}
             >
@@ -337,7 +353,9 @@ export function Checkout({
                 ? 'Confirmando…'
                 : attempt
                   ? 'Reintentar el mismo intento'
-                  : 'Confirmar reserva'}
+                  : turnstileToken
+                    ? 'Confirmar reserva'
+                    : 'Completa la verificación'}
             </button>
             <button
               disabled={Boolean(attempt)}
