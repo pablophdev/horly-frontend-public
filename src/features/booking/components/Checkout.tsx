@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
 import { useBlocker } from 'react-router-dom'
-import { ApiError, errorMessage } from '../../../shared/api/http'
+import { ApiError, RateLimitError, errorMessage } from '../../../shared/api/http'
 import { LeaveAttemptDialog } from '../../../shared/ui/LeaveAttemptDialog'
 import { bookingApi } from '../api'
 import type { BookingPayload, Business, Professional, Receipt, Service, Slot } from '../api'
@@ -13,7 +13,12 @@ type Customer = {
   customerPhone: string
   notes: string
 }
-type Attempt = { payload: BookingPayload; status: 'sending' | 'uncertain' }
+type Attempt = {
+  payload: BookingPayload
+  status: 'sending' | 'uncertain' | 'rate-limited'
+  uncertain: boolean
+  retryAt?: number
+}
 
 export function Checkout({
   business,
@@ -46,6 +51,7 @@ export function Checkout({
   const [attempt, setAttempt] = useState<Attempt>()
   const [receipt, setReceipt] = useState<Receipt>()
   const [error, setError] = useState('')
+  const [retryAfterSeconds, setRetryAfterSeconds] = useState(0)
   const busy = useRef(false)
   const mounted = useRef(true)
   const title = useRef<HTMLHeadingElement>(null)
@@ -68,6 +74,17 @@ export function Checkout({
   useEffect(() => {
     title.current?.focus()
   }, [review, receipt])
+  useEffect(() => {
+    const retryAt = attempt?.retryAt
+    if (retryAt === undefined || retryAt <= Date.now()) return
+    const updateRemaining = () => {
+      const remaining = Math.max(0, Math.ceil((retryAt - Date.now()) / 1_000))
+      setRetryAfterSeconds(remaining)
+      if (remaining === 0) window.clearInterval(timer)
+    }
+    const timer = window.setInterval(updateRemaining, 250)
+    return () => window.clearInterval(timer)
+  }, [attempt?.retryAt])
 
   function reviewCustomer(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
@@ -84,7 +101,7 @@ export function Checkout({
   }
 
   async function send() {
-    if (busy.current || receipt) return
+    if (busy.current || receipt || retryAfterSeconds > 0) return
     busy.current = true
     const payload = attempt?.payload ?? {
       requestKey: crypto.randomUUID(),
@@ -96,7 +113,9 @@ export function Checkout({
       customerPhone: customer.customerPhone.trim() || null,
       notes: customer.notes.trim() || null,
     }
-    setAttempt({ payload, status: 'sending' })
+    const wasUncertain = attempt?.uncertain ?? false
+    setRetryAfterSeconds(0)
+    setAttempt({ payload, status: 'sending', uncertain: wasUncertain })
     onLock(true)
     setError('')
     try {
@@ -107,8 +126,17 @@ export function Checkout({
       onSuccess()
     } catch (cause) {
       if (!mounted.current) return
-      if (!(cause instanceof ApiError) || cause.status >= 500) {
-        setAttempt({ payload, status: 'uncertain' })
+      if (cause instanceof RateLimitError) {
+        setRetryAfterSeconds(Math.max(0, Math.ceil((cause.retryAt - Date.now()) / 1_000)))
+        setAttempt({
+          payload,
+          status: 'rate-limited',
+          uncertain: wasUncertain,
+          retryAt: cause.retryAt,
+        })
+        setError('')
+      } else if (!(cause instanceof ApiError) || cause.status >= 500) {
+        setAttempt({ payload, status: 'uncertain', uncertain: true })
         setError(errorMessage(cause))
       } else {
         setAttempt(undefined)
@@ -277,7 +305,7 @@ export function Checkout({
               {error}
             </p>
           )}
-          {attempt?.status === 'uncertain' && (
+          {attempt?.uncertain && (
             <div role="alert" className="notice warning">
               <strong>El resultado es incierto.</strong>
               <p>
@@ -287,11 +315,27 @@ export function Checkout({
               <p>No cierres esta página: el intento se conserva solo en memoria.</p>
             </div>
           )}
+          {attempt?.status === 'rate-limited' && retryAfterSeconds > 0 && (
+            <>
+              <p className="sr-only" role="status">
+                Se alcanzó el límite de intentos. El botón de reintento estará disponible al
+                finalizar la espera.
+              </p>
+              <p id="rate-limit-countdown" className="notice warning">
+                Demasiados intentos. Puedes reintentar en {retryAfterSeconds} segundos
+              </p>
+            </>
+          )}
           <div className="actions">
-            <button className="primary" disabled={attempt?.status === 'sending'} onClick={send}>
+            <button
+              className="primary"
+              disabled={attempt?.status === 'sending' || retryAfterSeconds > 0}
+              aria-describedby={retryAfterSeconds > 0 ? 'rate-limit-countdown' : undefined}
+              onClick={send}
+            >
               {attempt?.status === 'sending'
                 ? 'Confirmando…'
-                : attempt?.status === 'uncertain'
+                : attempt
                   ? 'Reintentar el mismo intento'
                   : 'Confirmar reserva'}
             </button>

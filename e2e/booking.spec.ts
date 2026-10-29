@@ -215,6 +215,139 @@ for (const failure of ['network', '500', 'invalid'] as const) {
   })
 }
 
+test('429 espera, no reintenta automáticamente y conserva payload y clave', async ({ page }) => {
+  const requests = await mockApi(page, {
+    post: (route, count) =>
+      count === 1
+        ? route.fulfill({
+            status: 429,
+            headers: {
+              'Retry-After': '2',
+              'Access-Control-Expose-Headers': 'Retry-After',
+            },
+            json: {
+              status: 429,
+              code: 'PUBLIC_BOOKING_RATE_LIMIT',
+              message: 'Demasiados intentos. Espera antes de volver a intentar.',
+              retryAfterSeconds: 45,
+            },
+          })
+        : route.fulfill({ status: 201, json: receipt }),
+  })
+  await review(page)
+  await page.getByRole('button', { name: 'Confirmar reserva', exact: true }).click()
+
+  const countdown = page.getByText('Demasiados intentos. Puedes reintentar en 2 segundos')
+  await expect(countdown).toBeVisible()
+  await expect(countdown).not.toHaveAttribute('role')
+  await expect(countdown).not.toHaveAttribute('aria-live')
+  await expect(page.getByRole('status')).toHaveCount(1)
+  const retry = page.getByRole('button', { name: 'Reintentar el mismo intento' })
+  await expect(retry).toBeDisabled()
+  await expect(page.getByRole('button', { name: 'Editar datos' })).toBeDisabled()
+
+  await page.clock.fastForward(1_000)
+  await expect(page.getByText('Demasiados intentos. Puedes reintentar en 1 segundos')).toBeVisible()
+  expect(requests.filter((request) => request.body)).toHaveLength(1)
+  await page.clock.fastForward(1_100)
+  await expect(retry).toBeEnabled()
+  expect(requests.filter((request) => request.body)).toHaveLength(1)
+
+  await retry.click()
+  await expect(page.getByRole('heading', { name: 'Tu reserva ha sido registrada' })).toBeVisible()
+  const posts = requests.filter((request) => request.body)
+  expect(posts).toHaveLength(2)
+  expect(posts[0].body).toBe(posts[1].body)
+})
+
+test('429 usa retryAfterSeconds cuando Retry-After es inválido', async ({ page }) => {
+  await mockApi(page, {
+    post: (route) =>
+      route.fulfill({
+        status: 429,
+        headers: { 'Retry-After': 'no-es-valido' },
+        json: { retryAfterSeconds: 45 },
+      }),
+  })
+  await review(page)
+  await page.getByRole('button', { name: 'Confirmar reserva', exact: true }).click()
+  await expect(
+    page.getByText('Demasiados intentos. Puedes reintentar en 45 segundos'),
+  ).toBeVisible()
+})
+
+for (const response of ['vacía', 'inválida'] as const) {
+  test(`429 conserva su tipo con respuesta ${response} y aplica 60 segundos`, async ({ page }) => {
+    await mockApi(page, {
+      post: (route) =>
+        route.fulfill({
+          status: 429,
+          ...(response === 'inválida' ? { headers: { 'Retry-After': 'mañana' } } : {}),
+          body: response === 'vacía' ? '' : '{json-inválido',
+        }),
+    })
+    await review(page)
+    await page.getByRole('button', { name: 'Confirmar reserva', exact: true }).click()
+    await expect(
+      page.getByText('Demasiados intentos. Puedes reintentar en 60 segundos'),
+    ).toBeVisible()
+    await expect(page.getByText('La respuesta del servidor no es válida.')).toHaveCount(0)
+  })
+}
+
+test('429 admite una fecha HTTP en Retry-After', async ({ page }) => {
+  await mockApi(page, {
+    post: (route) =>
+      route.fulfill({
+        status: 429,
+        headers: {
+          'Retry-After': 'Sun, 01 Nov 2026 02:02:00 GMT',
+          'Access-Control-Expose-Headers': 'Retry-After',
+        },
+        body: '',
+      }),
+  })
+  await review(page)
+  await page.getByRole('button', { name: 'Confirmar reserva', exact: true }).click()
+  await expect(
+    page.getByText(/Demasiados intentos\. Puedes reintentar en 1(?:1\d|20) segundos/),
+  ).toBeVisible()
+})
+
+test('un 429 posterior conserva un resultado incierto anterior', async ({ page }) => {
+  const requests = await mockApi(page, {
+    post: (route, count) => {
+      if (count === 1) return route.abort('failed')
+      if (count === 2)
+        return route.fulfill({
+          status: 429,
+          headers: {
+            'Retry-After': '1',
+            'Access-Control-Expose-Headers': 'Retry-After',
+          },
+          body: '',
+        })
+      return route.fulfill({ status: 201, json: receipt })
+    },
+  })
+  await review(page)
+  await page.getByRole('button', { name: 'Confirmar reserva', exact: true }).click()
+  await expect(page.getByText('El resultado es incierto.', { exact: true })).toBeVisible()
+  await page.getByRole('button', { name: 'Reintentar el mismo intento' }).click()
+  await expect(page.getByText('Demasiados intentos. Puedes reintentar en 1 segundos')).toBeVisible()
+  await expect(page.getByText('El resultado es incierto.', { exact: true })).toBeVisible()
+  await expect(page.getByRole('button', { name: 'Editar datos' })).toBeDisabled()
+  expect(requests.filter((request) => request.body)).toHaveLength(2)
+
+  await page.clock.fastForward(1_100)
+  expect(requests.filter((request) => request.body)).toHaveLength(2)
+  await page.getByRole('button', { name: 'Reintentar el mismo intento' }).click()
+  await expect(page.getByRole('heading', { name: 'Tu reserva ha sido registrada' })).toBeVisible()
+  const posts = requests.filter((request) => request.body)
+  expect(posts).toHaveLength(3)
+  expect(new Set(posts.map((request) => request.body)).size).toBe(1)
+})
+
 test('zona del negocio, límites locales y horas repetidas por DST', async ({ page }) => {
   const requests = await mockApi(page)
   await selectService(page)
