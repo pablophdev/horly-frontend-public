@@ -10,6 +10,7 @@ const instant = text.refine(
 )
 const money = { price: z.number().finite().nonnegative(), currency: z.string().regex(/^[A-Z]{3}$/) }
 const duration = z.number().int().positive()
+const publicImageUrl = z.string().url().nullable()
 const businessSchema = z.object({
   name: text,
   slug: text,
@@ -17,6 +18,8 @@ const businessSchema = z.object({
   phone: z.string().nullable(),
   address: z.string().nullable(),
   timeZone: zone,
+  logoImageUrl: publicImageUrl,
+  coverImageUrl: publicImageUrl,
 })
 const serviceSchema = z.object({
   id: text,

@@ -7,6 +7,7 @@ import { bookingApi } from './api'
 import type { Business, Professional, Service, Slot } from './api'
 import { price, slotTimeLabels } from './format'
 import { Checkout } from './components/Checkout'
+import { BusinessHero } from './components/BusinessHero'
 
 export function BookingPage({ slug }: { slug: string }) {
   const load = useCallback((signal: AbortSignal) => bookingApi.business(slug, signal), [slug])
@@ -26,15 +27,7 @@ export function BookingPage({ slug }: { slug: string }) {
   const business = result.data
   return (
     <>
-      <section className="business-heading">
-        <span className="eyebrow">RESERVA TU MOMENTO</span>
-        <h1>{business.name}</h1>
-        {business.description && <p className="description">{business.description}</p>}
-        <div className="business-details">
-          {business.address && <address>{business.address}</address>}
-          {business.phone && <span>Tel. {business.phone}</span>}
-        </div>
-      </section>
+      <BusinessHero business={business} />
       <BookingFlow
         key={generation}
         business={business}

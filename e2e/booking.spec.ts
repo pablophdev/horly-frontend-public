@@ -36,6 +36,9 @@ type MockOptions = {
   post?: (route: Route, count: number) => Promise<void>
   serviceError?: boolean
   turnstile?: 'auto' | 'error' | 'script-blocked'
+  businessImages?: { logoImageUrl: string | null; coverImageUrl: string | null }
+  otherBusinessImages?: { logoImageUrl: string | null; coverImageUrl: string | null }
+  imageFailures?: Array<'logo' | 'cover' | 'other-logo' | 'other-cover'>
 }
 
 async function mockApi(page: Page, options: MockOptions = {}) {
@@ -47,6 +50,19 @@ async function mockApi(page: Page, options: MockOptions = {}) {
   }[] = []
   let posts = 0
   await page.clock.install({ time: new Date('2026-11-01T02:00:00Z') })
+  await page.route('https://images.test/**', (route) => {
+    const imageName = new URL(route.request().url()).pathname.slice(1).replace('.svg', '')
+    if (
+      options.imageFailures?.includes(
+        imageName as NonNullable<MockOptions['imageFailures']>[number],
+      )
+    )
+      return route.abort('failed')
+    return route.fulfill({
+      contentType: 'image/svg+xml',
+      body: '<svg xmlns="http://www.w3.org/2000/svg" width="800" height="300"><rect width="100%" height="100%" fill="#d9d6ff"/></svg>',
+    })
+  })
   if (options.turnstile === 'script-blocked') {
     await page.route(
       'https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit',
@@ -127,13 +143,18 @@ async function mockApi(page: Page, options: MockOptions = {}) {
         slots: options.empty === 'slots' ? [] : slots,
       })
     if (options.missing) return json({}, 404)
+    const isOther = path.endsWith('/otro')
+    const images = isOther
+      ? (options.otherBusinessImages ?? { logoImageUrl: null, coverImageUrl: null })
+      : (options.businessImages ?? { logoImageUrl: null, coverImageUrl: null })
     return json({
-      name: path.endsWith('/otro') ? 'Otro negocio' : 'Salón Horly',
+      name: isOther ? 'Otro negocio' : 'Salón Horly',
       slug: path.split('/').at(-1),
       description: 'Tu espacio de cuidado',
       phone: null,
       address: 'Calle 10',
       timeZone: 'America/New_York',
+      ...images,
     })
   })
   return requests
@@ -205,6 +226,123 @@ test('slug inexistente', async ({ page }) => {
   await mockApi(page, { missing: true })
   await page.goto('/reservar/no-existe')
   await expect(page.getByRole('heading', { name: 'Negocio no encontrado' })).toBeVisible()
+})
+
+test('muestra logo y banner públicos con presentación responsive', async ({ page }) => {
+  await mockApi(page, {
+    businessImages: {
+      logoImageUrl: 'https://images.test/logo.svg',
+      coverImageUrl: 'https://images.test/cover.svg',
+    },
+  })
+  await page.goto('/reservar/salon')
+
+  const logo = page.getByAltText('Logo de Salón Horly')
+  const cover = page.getByTestId('business-cover').locator('img')
+  await expect(logo).toBeVisible()
+  await expect(logo).toHaveAttribute('src', 'https://images.test/logo.svg')
+  await expect(cover).toBeVisible()
+  await expect(cover).toHaveAttribute('src', 'https://images.test/cover.svg')
+  expect(await logo.evaluate((element) => getComputedStyle(element).objectFit)).toBe('contain')
+  expect(await cover.evaluate((element) => getComputedStyle(element).objectFit)).toBe('cover')
+
+  const coverBox = await page.getByTestId('business-cover').boundingBox()
+  const logoBox = await page.getByTestId('business-logo').boundingBox()
+  expect(coverBox?.height).toBeGreaterThanOrEqual(150)
+  expect(logoBox?.width).toBeGreaterThanOrEqual(60)
+  expect(logoBox?.height).toBe(logoBox?.width)
+})
+
+test('campos de imagen null muestran banner predeterminado e iniciales', async ({ page }) => {
+  await mockApi(page)
+  await page.goto('/reservar/salon')
+  await expect(page.getByTestId('business-cover')).toHaveClass(/business-hero__cover--fallback/)
+  await expect(page.getByTestId('business-cover').locator('img')).toHaveCount(0)
+  await expect(page.getByTestId('business-logo')).toHaveClass(/business-hero__logo--fallback/)
+  await expect(page.getByTestId('business-logo')).toContainText('SH')
+  await expect(page.getByAltText('Logo de Salón Horly')).toHaveCount(0)
+})
+
+test('fallos de logo y banner usan fallbacks y no bloquean la reserva', async ({ page }) => {
+  await mockApi(page, {
+    businessImages: {
+      logoImageUrl: 'https://images.test/logo.svg',
+      coverImageUrl: 'https://images.test/cover.svg',
+    },
+    imageFailures: ['logo', 'cover'],
+  })
+  await review(page)
+  await expect(page.getByTestId('business-cover')).toHaveClass(/business-hero__cover--fallback/)
+  await expect(page.getByTestId('business-logo')).toHaveClass(/business-hero__logo--fallback/)
+  await expect(page.getByTestId('business-logo')).toContainText('SH')
+  await page.getByRole('button', { name: 'Confirmar reserva', exact: true }).click()
+  await expect(page.getByRole('heading', { name: 'Tu reserva ha sido registrada' })).toBeVisible()
+})
+
+test('al cambiar de negocio descarta imágenes anteriores y reinicia URLs y errores', async ({
+  page,
+}) => {
+  await mockApi(page, {
+    businessImages: {
+      logoImageUrl: 'https://images.test/logo.svg',
+      coverImageUrl: 'https://images.test/cover.svg',
+    },
+    otherBusinessImages: {
+      logoImageUrl: 'https://images.test/other-logo.svg',
+      coverImageUrl: 'https://images.test/other-cover.svg',
+    },
+    imageFailures: ['logo'],
+  })
+  await page.goto('/reservar/salon')
+  await expect(page.getByTestId('business-logo')).toHaveClass(/business-hero__logo--fallback/)
+  await expect(page.locator('img[src="https://images.test/cover.svg"]')).toBeVisible()
+
+  let release!: () => void
+  let arrived!: () => void
+  const received = new Promise<void>((resolve) => {
+    arrived = resolve
+  })
+  const delayed = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  await page.route('**/api/public/businesses/otro', async (route) => {
+    arrived()
+    await delayed
+    await route.fulfill({
+      json: {
+        name: 'Otro negocio',
+        slug: 'otro',
+        description: 'Otra identidad',
+        phone: null,
+        address: 'Calle 20',
+        timeZone: 'America/New_York',
+        logoImageUrl: 'https://images.test/other-logo.svg',
+        coverImageUrl: 'https://images.test/other-cover.svg',
+      },
+    })
+  })
+  await page.evaluate(() => {
+    window.history.pushState(
+      { ...window.history.state, idx: window.history.state.idx + 1 },
+      '',
+      '/reservar/otro',
+    )
+    window.dispatchEvent(new PopStateEvent('popstate'))
+  })
+  await received
+  await expect(page.getByTestId('business-logo')).toHaveCount(0)
+  await expect(page.locator('img[src="https://images.test/cover.svg"]')).toHaveCount(0)
+  release()
+
+  await expect(page.getByAltText('Logo de Otro negocio')).toHaveAttribute(
+    'src',
+    'https://images.test/other-logo.svg',
+  )
+  await expect(page.getByTestId('business-cover').locator('img')).toHaveAttribute(
+    'src',
+    'https://images.test/other-cover.svg',
+  )
+  await expect(page.getByRole('heading', { name: 'Salón Horly' })).toHaveCount(0)
 })
 
 for (const empty of ['services', 'professionals', 'slots'] as const) {

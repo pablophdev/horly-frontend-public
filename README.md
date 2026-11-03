@@ -72,11 +72,12 @@ Todas las rutas de API comienzan por `/api/public/businesses/{slug}`:
 | GET    | `/availability?professionalId=…&serviceId=…&date=YYYY-MM-DD` | Turnos ofrecidos por el backend                        |
 | POST   | `/bookings`                                                  | Crear o recuperar el resultado de un intento; HTTP 201 |
 
-Slug codificado con `encodeURIComponent`, parámetros con `URLSearchParams`, sin `Authorization` y con `credentials: 'omit'`. El POST añade el token efímero exclusivamente en `X-Turnstile-Token`; el JSON mantiene su contrato. No hay datos demo en la aplicación, SDK de Supabase ni acceso a base de datos.
+Slug codificado con `encodeURIComponent`, parámetros con `URLSearchParams`, sin `Authorization` y con `credentials: 'omit'`. La respuesta pública del negocio aporta `logoImageUrl` y `coverImageUrl`; ambas se validan como URL pública o `null` y se muestran sin peticiones privadas. El POST añade el token efímero exclusivamente en `X-Turnstile-Token`; el JSON mantiene su contrato. No hay datos demo en la aplicación, SDK de Supabase ni acceso a base de datos.
 
 ## Comportamiento de reservas
 
 - Cambiar negocio remonta la feature y limpia todos sus datos. Las consultas usan `AbortController` y descartan respuestas obsoletas. Cambiar servicio limpia profesional y turno; cambiar profesional o fecha limpia turno.
+- La cabecera reserva espacio estable para banner y logo. El banner es decorativo y usa `object-fit: cover`; el logo tiene texto alternativo, fondo apto para transparencias y `object-fit: contain`. Valores `null` o errores de carga muestran un fondo de marca e iniciales, sin reintentos ni bloquear la reserva. Las claves por slug y URL reinician los fallbacks al cambiar de negocio o imagen.
 - Hoy y el máximo de 90 días se calculan con Luxon en la zona IANA del negocio. `date` viaja sin conversión UTC y `startsAt` conserva exactamente el string del slot. El desfase UTC solo aparece para diferenciar horas locales repetidas por DST. No se generan turnos en React.
 - Nombre obligatorio (150), correo válido si se proporciona (254), teléfono (30), notas (1000); al menos correo o teléfono. Opcionales vacíos se envían como `null`.
 - El resumen precede al POST. Este solo envía los campos del contrato: clave, profesional, servicio, inicio y datos del cliente. El comprobante usa los valores devueltos por el backend, incluido precio, duración y estado.
