@@ -39,17 +39,24 @@ const availabilitySchema = z.object({
   durationMinutes: duration,
   slots: z.array(slotSchema),
 })
-const receiptSchema = z.object({
-  id: text,
-  businessSlug: text,
-  serviceName: text,
-  durationMinutes: duration,
-  ...money,
-  timeZone: zone,
-  startsAt: instant,
-  endsAt: instant,
-  status: text,
-})
+const receiptSchema = z
+  .object({
+    id: text,
+    businessSlug: text,
+    serviceName: text,
+    durationMinutes: duration,
+    ...money,
+    timeZone: zone,
+    startsAt: instant,
+    endsAt: instant,
+    status: text,
+  })
+  .refine(
+    ({ startsAt, endsAt }) =>
+      DateTime.fromISO(endsAt, { setZone: true }).toMillis() >
+      DateTime.fromISO(startsAt, { setZone: true }).toMillis(),
+    { message: 'Booking end must be after its start' },
+  )
 
 export type Business = z.infer<typeof businessSchema>
 export type Service = z.infer<typeof serviceSchema>

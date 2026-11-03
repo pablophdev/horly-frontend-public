@@ -39,6 +39,12 @@ type MockOptions = {
   businessImages?: { logoImageUrl: string | null; coverImageUrl: string | null }
   otherBusinessImages?: { logoImageUrl: string | null; coverImageUrl: string | null }
   imageFailures?: Array<'logo' | 'cover' | 'other-logo' | 'other-cover'>
+  bookingReceipt?: typeof receipt
+  businessDetails?: Partial<{
+    name: string
+    address: string | null
+    timeZone: string
+  }>
 }
 
 async function mockApi(page: Page, options: MockOptions = {}) {
@@ -124,7 +130,7 @@ async function mockApi(page: Page, options: MockOptions = {}) {
     if (path.endsWith('/bookings')) {
       posts++
       if (options.post) return options.post(route, posts)
-      return json(receipt, 201)
+      return json(options.bookingReceipt ?? receipt, 201)
     }
     if (path.endsWith('/services'))
       return options.serviceError
@@ -154,6 +160,7 @@ async function mockApi(page: Page, options: MockOptions = {}) {
       phone: null,
       address: 'Calle 10',
       timeZone: 'America/New_York',
+      ...options.businessDetails,
       ...images,
     })
   })
@@ -187,6 +194,34 @@ test('recorrido completo, comprobante del backend y ningún Authorization', asyn
   await expect(page.getByRole('heading', { name: 'Tu reserva ha sido registrada' })).toBeVisible()
   await expect(page.getByText('Corte confirmado')).toBeVisible()
   await expect(page.getByText('35 min', { exact: true })).toBeVisible()
+  const calendarLink = page.getByRole('link', { name: 'Agregar a Google Calendar' })
+  await expect(calendarLink).toBeVisible()
+  await expect(calendarLink).toHaveAttribute('target', '_blank')
+  await expect(calendarLink).toHaveAttribute('rel', 'noopener noreferrer')
+  await expect(calendarLink).toHaveAttribute('referrerpolicy', 'no-referrer')
+  await expect(
+    page.getByText('Se abrirá Google Calendar para que guardes el evento.'),
+  ).toBeVisible()
+  await expect(
+    page.getByText(
+      'Los cambios o cancelaciones de la reserva no se sincronizan automáticamente con tu calendario.',
+    ),
+  ).toBeVisible()
+  const calendarUrl = new URL((await calendarLink.getAttribute('href'))!)
+  expect(`${calendarUrl.origin}${calendarUrl.pathname}`).toBe(
+    'https://calendar.google.com/calendar/render',
+  )
+  expect(Object.fromEntries(calendarUrl.searchParams)).toEqual({
+    action: 'TEMPLATE',
+    text: 'Reserva en Salón Horly',
+    dates: '20261101T053000Z/20261101T060000Z',
+    details: 'Reserva confirmada en Horly. Referencia: reservation-real-response',
+    ctz: 'America/New_York',
+    location: 'Calle 10',
+  })
+  expect(calendarUrl.toString()).not.toMatch(
+    /Pablo Cliente|pablo%40example\.com|simulated-turnstile-token|Corte confirmado/,
+  )
   const body = JSON.parse(requests.find((r) => r.body)!.body!)
   expect(body).toEqual({
     requestKey: expect.stringMatching(/^[\da-f-]{36}$/),
@@ -220,6 +255,100 @@ test('recorrido completo, comprobante del backend y ningún Authorization', asyn
     'aria-pressed',
     'false',
   )
+})
+
+test('calendario codifica caracteres especiales y cruza el día en UTC', async ({ page }) => {
+  await mockApi(page, {
+    businessDetails: {
+      name: 'Clínica Ágil & Spa',
+      address: 'C/ Peñón, 2.º – Málaga',
+    },
+    bookingReceipt: {
+      ...receipt,
+      startsAt: '2026-03-08T19:30:00-04:00',
+      endsAt: '2026-03-08T21:00:00-04:00',
+    },
+  })
+  await selectSlot(page)
+  await page.getByLabel('Nombre completo').fill('Álvaro Cliente')
+  await page.getByLabel('Correo electrónico').fill('alvaro@example.com')
+  await page.getByLabel('Teléfono', { exact: true }).fill('+34 600 123 456')
+  await page.getByLabel('Notas').fill('Nota clínica privada')
+  await page.getByRole('button', { name: 'Revisar reserva' }).click()
+  await page.getByRole('button', { name: 'Confirmar reserva', exact: true }).click()
+
+  const href = await page
+    .getByRole('link', { name: 'Agregar a Google Calendar' })
+    .getAttribute('href')
+  const url = new URL(href!)
+  expect(url.searchParams.get('text')).toBe('Reserva en Clínica Ágil & Spa')
+  expect(url.searchParams.get('location')).toBe('C/ Peñón, 2.º – Málaga')
+  expect(url.searchParams.get('dates')).toBe('20260308T233000Z/20260309T010000Z')
+  expect(url.searchParams.get('ctz')).toBe('America/New_York')
+  expect(decodeURIComponent(href!)).not.toMatch(
+    /Álvaro Cliente|alvaro@example\.com|600 123 456|Nota clínica privada|simulated-turnstile-token/,
+  )
+})
+
+for (const status of ['PENDING', 'CANCELLED'] as const) {
+  test(`no ofrece calendario para una respuesta ${status}`, async ({ page }) => {
+    await mockApi(page, { bookingReceipt: { ...receipt, status } })
+    await review(page)
+    await page.getByRole('button', { name: 'Confirmar reserva', exact: true }).click()
+    await expect(page.getByText(status, { exact: true })).toBeVisible()
+    await expect(page.getByRole('link', { name: 'Agregar a Google Calendar' })).toHaveCount(0)
+  })
+}
+
+test('no ofrece calendario durante el envío pendiente', async ({ page }) => {
+  let complete!: () => void
+  const pending = new Promise<void>((resolve) => {
+    complete = resolve
+  })
+  await mockApi(page, {
+    post: async (route) => {
+      await pending
+      await route.fulfill({ status: 201, json: receipt })
+    },
+  })
+  await review(page)
+  await page.getByRole('button', { name: 'Confirmar reserva', exact: true }).click()
+  await expect(page.getByRole('button', { name: 'Confirmando…' })).toBeDisabled()
+  await expect(page.getByRole('link', { name: 'Agregar a Google Calendar' })).toHaveCount(0)
+  complete()
+  await expect(page.getByRole('link', { name: 'Agregar a Google Calendar' })).toBeVisible()
+})
+
+test('datos temporales inválidos producen incertidumbre y no un enlace', async ({ page }) => {
+  await mockApi(page, {
+    bookingReceipt: {
+      ...receipt,
+      startsAt: '2026-11-01T02:00:00-05:00',
+      endsAt: '2026-11-01T01:30:00-05:00',
+    },
+  })
+  await review(page)
+  await page.getByRole('button', { name: 'Confirmar reserva', exact: true }).click()
+  await expect(page.getByText('El resultado es incierto.', { exact: true })).toBeVisible()
+  await expect(page.getByRole('link', { name: 'Agregar a Google Calendar' })).toHaveCount(0)
+})
+
+test('descarta el calendario anterior al cambiar de negocio', async ({ page }) => {
+  await mockApi(page)
+  await review(page)
+  await page.getByRole('button', { name: 'Confirmar reserva', exact: true }).click()
+  await expect(page.getByRole('link', { name: 'Agregar a Google Calendar' })).toBeVisible()
+
+  await page.evaluate(() => {
+    window.history.pushState(
+      { ...window.history.state, idx: window.history.state.idx + 1 },
+      '',
+      '/reservar/otro',
+    )
+    window.dispatchEvent(new PopStateEvent('popstate'))
+  })
+  await expect(page.getByRole('link', { name: 'Agregar a Google Calendar' })).toHaveCount(0)
+  await expect(page.getByRole('heading', { name: 'Otro negocio' })).toBeVisible()
 })
 
 test('slug inexistente', async ({ page }) => {
@@ -405,6 +534,7 @@ for (const failure of ['network', '503', 'invalid'] as const) {
     await review(page)
     await page.getByRole('button', { name: 'Confirmar reserva', exact: true }).click()
     await expect(page.getByText('El resultado es incierto.', { exact: true })).toBeVisible()
+    await expect(page.getByRole('link', { name: 'Agregar a Google Calendar' })).toHaveCount(0)
     await expect(page.getByRole('button', { name: 'Editar datos' })).toBeDisabled()
     await expect(page.getByLabel('Fecha', { exact: true })).toBeDisabled()
     await expect(page.getByRole('button', { name: /Corte de cabello/ })).toBeDisabled()

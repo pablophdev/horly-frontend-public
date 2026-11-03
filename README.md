@@ -45,6 +45,7 @@ src/
       api.ts                   # Contratos, validación runtime y endpoints públicos
       BookingPage.tsx          # Negocio, servicios, profesionales y disponibilidad
       format.ts                # Precio, zona IANA y desfase UTC
+      googleCalendar.ts        # URL testeable para el evento confirmado
       components/Checkout.tsx  # Cliente, resumen, intento idempotente y comprobante
   shared/
     api/http.ts                # Transporte, errores HTTP/conexión/respuesta inválida
@@ -87,6 +88,8 @@ Slug codificado con `encodeURIComponent`, parámetros con `URLSearchParams`, sin
 - 429 conserva la clave y el payload exactos, bloquea edición y envío durante la espera y habilita después un reintento exclusivamente manual. Se prioriza `Retry-After` (segundos o fecha HTTP), después `retryAfterSeconds` del JSON y finalmente 60 segundos. La cuenta usa un instante límite, no acumula intervalos, y no elimina una incertidumbre previa. Para que JavaScript pueda leer `Retry-After` en una petición CORS, el backend debe exponerlo con `Access-Control-Expose-Headers: Retry-After`; si no lo hace, se usa el cuerpo o el fallback. No se ha modificado el backend.
 - Turnstile usa el script oficial con renderizado explícito, acción `create_booking` e idioma español. Sin configuración o ante bloqueo/error del script no existe bypass: confirmar permanece deshabilitado y se ofrece recargar la verificación. Cada POST consume su token; al finalizar la petición o fallar la red, se descarta y reinicia el widget. El nuevo token nunca cambia la clave ni el cuerpo congelado, no se persiste y no se registra. Un 403 solicita otra verificación sin dirigir a login ni eliminar una incertidumbre previa.
 - Seleccionar horario no bloquea el turno. Confirmar no representa un pago.
+- Solo un comprobante validado con estado `CONFIRMED` ofrece “Agregar a Google Calendar”. La URL de plantilla se construye con `URL` y `URLSearchParams`; usa los instantes `startsAt`/`endsAt` de la respuesta convertidos a UTC con Luxon, y el nombre, dirección opcional y zona IANA de la instantánea del negocio correspondiente. Si fechas, orden, slug o zona no son coherentes, no se genera el enlace. No se incluyen servicio, profesional ni datos del cliente, notas, tokens o claves.
+- El enlace abre la interfaz web de Google en otra pestaña. No usa la API de Calendar, OAuth, peticiones adicionales ni afirma que Google haya guardado el evento. Los cambios y cancelaciones posteriores no se sincronizan. Como el resto del comprobante, no se persiste: una recarga lo descarta y no se inventan datos para restaurarlo.
 
 ## Pruebas E2E con mocks
 
@@ -97,7 +100,7 @@ npm run test:e2e
 
 Playwright inicia su propio Vite en **http://localhost:5174**, con puerto estricto, una Site Key pública de pruebas y sin reutilizar servidores existentes. Los endpoints y Turnstile se simulan dentro del navegador: estas pruebas no contactan Cloudflare, no requieren Spring Boot y no acreditan su integración, validación criptográfica ni CORS. Se ejecutan en Chromium escritorio y Chromium con viewport/táctil móvil (no es Safari), con zona del navegador `Asia/Tokyo` y negocio `America/New_York`.
 
-Cobertura: recorrido completo, encabezado Turnstile y payload permitido, configuración `action`/idioma, expiración, error y bloqueo del script, 403, renovación de token con clave/cuerpo idénticos tras red/503, 429 sin POST automático, comprobante del backend, ausencia de Authorization, slug inexistente, listas vacías, conflictos, respuestas inválidas y atrasadas, abandono, zonas horarias, DST, validaciones, inicio y 404.
+Cobertura: recorrido completo, encabezado Turnstile y payload permitido, configuración `action`/idioma, expiración, error y bloqueo del script, 403, renovación de token con clave/cuerpo idénticos tras red/503, 429 sin POST automático, comprobante del backend, ausencia de Authorization, slug inexistente, listas vacías, conflictos, respuestas inválidas y atrasadas, abandono, zonas horarias, DST, validaciones, inicio y 404. También comprueba la URL de Google sin navegar a Google: confirmación real simulada, ausencia durante envío/incertidumbre y para estados no confirmados, UTC exacto con DST y cruce de día, navegador y negocio en zonas distintas, codificación de caracteres, exclusión de datos personales/tokens, fechas inválidas, cambio de negocio y presentación en los proyectos escritorio y móvil. Todo ello usa respuestas HTTP simuladas; no demuestra una reserva ni un guardado reales.
 
 ## Verificación con Spring Boot real (manual)
 
@@ -110,5 +113,6 @@ Cobertura: recorrido completo, encabezado Turnstile y payload permitido, configu
 7. Comprobar que la disponibilidad se reconsulta tras éxito. Usar “Crear otra reserva” para comenzar otro intento.
 8. Para probar idempotencia real, repetir controladamente el mismo POST con la misma clave y cuerpo pero un token Turnstile nuevo en un entorno de pruebas: debe devolver HTTP 201 y el mismo identificador, sin crear otra reserva. Para probar conflicto, intentar reservar un turno que otro cliente haya ocupado mientras se revisaba el resumen.
 9. Probar desde un navegador cuya zona sea diferente a la del negocio y comprobar fecha, hora y desfase en el resumen y comprobante.
+10. Tras recibir un comprobante real `CONFIRMED`, inspeccionar que aparece “Agregar a Google Calendar”, abrirlo y comprobar manualmente título genérico, inicio, fin, zona y dirección antes de guardar. El guardado ocurre en Google y Horly no puede comprobarlo. Confirmar también que una cancelación o cambio posterior no modifica el evento de Google automáticamente.
 
 **La verificación con Spring Boot real no se ha realizado durante esta implementación.** Los resultados automatizados corresponden a mocks HTTP. No se implementan pagos, cancelación pública, consulta de reservas previas, envío de correos, cuentas ni funciones administrativas.

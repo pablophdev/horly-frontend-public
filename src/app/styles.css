@@ -596,6 +596,36 @@ dd.total {
 .reference {
   font-family: monospace;
 }
+.calendar-action {
+  margin: 20px 0;
+  padding: 18px;
+  background: #fafaff;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.primary-link {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  padding: 11px 17px;
+  color: #fff;
+  background: var(--brand);
+  border: 1px solid var(--brand);
+  border-radius: 9px;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: center;
+  text-decoration: none;
+}
+.primary-link:hover {
+  color: #fff;
+  background: #4c45e0;
+}
+.calendar-action p {
+  margin-top: 10px;
+  font-size: 11px;
+}
 .landing {
   max-width: 630px;
   margin: 60px auto;

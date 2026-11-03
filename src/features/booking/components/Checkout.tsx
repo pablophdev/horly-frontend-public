@@ -8,6 +8,7 @@ import type { TurnstileWidgetHandle } from '../../../shared/turnstile/TurnstileW
 import { bookingApi } from '../api'
 import type { BookingPayload, Business, Professional, Receipt, Service, Slot } from '../api'
 import { dateTime, price, time } from '../format'
+import { buildGoogleCalendarUrl } from '../googleCalendar'
 
 type Customer = {
   customerName: string
@@ -166,7 +167,8 @@ export function Checkout({
     }
   }
 
-  if (receipt)
+  if (receipt) {
+    const googleCalendarUrl = buildGoogleCalendarUrl(receipt, business)
     return (
       <section className="card receipt">
         <span className="success-mark" aria-hidden="true">
@@ -198,11 +200,32 @@ export function Checkout({
           <dd>{receipt.status}</dd>
         </dl>
         <p className="notice">La confirmación no representa un pago.</p>
-        <button className="primary" onClick={onNew}>
-          Crear otra reserva
-        </button>
+        {googleCalendarUrl && (
+          <div className="calendar-action">
+            <a
+              className="primary-link"
+              href={googleCalendarUrl}
+              target="_blank"
+              rel="noopener noreferrer"
+              referrerPolicy="no-referrer"
+            >
+              Agregar a Google Calendar
+            </a>
+            <p>Se abrirá Google Calendar para que guardes el evento.</p>
+            <p>
+              Los cambios o cancelaciones de la reserva no se sincronizan automáticamente con tu
+              calendario.
+            </p>
+          </div>
+        )}
+        <div className="actions">
+          <button className="primary" onClick={onNew}>
+            Crear otra reserva
+          </button>
+        </div>
       </section>
     )
+  }
 
   return (
     <section className="card">
